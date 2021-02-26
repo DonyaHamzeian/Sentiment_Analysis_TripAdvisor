@@ -1,0 +1,352 @@
+---
+title: "TripAdvisorScraper"
+author: "Donya Hamzeian"
+date: "2/7/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#load libraries
+```{r}
+library(rvest)
+library(curl)
+library(httr)
+library(RSelenium)
+library(stringr)
+library(rebus)
+library(dplyr)
+```
+
+#create a remote driver
+```{r}
+
+
+remDr <- remoteDriver(
+  remoteServerAddr = "localhost",
+  port = 4445L,
+  browserName = "firefox"
+)
+remDr$open()
+remDr$navigate("https://www.tripadvisor.com.au/Airlines")
+
+remDr$setTimeout(type = "implicit", milliseconds = 10000)
+remDr$setTimeout(type = "page load", milliseconds = 10000)
+remDr$setTimeout(type = "script", milliseconds = 10000)
+
+remDr$screenshot(display = T)
+```
+
+
+
+
+```{r}
+
+num_page= 59
+# url_df = data.frame(name="", rating="", href="",num_review="", stringsAsFactors = F )
+
+
+
+for (i in 37:num_page){
+  print(i)
+  html_page= read_html(remDr$getPageSource()[[1]])
+  name = html_page %>% html_nodes(".airlineName") %>% html_attr("data-name")
+  print(name)
+  href =  html_page %>% html_nodes(".detailsLink") %>% html_attr("href")
+  num_review =  html_page %>%  html_nodes(".airlineReviews") %>% html_text() %>% strsplit(' ') %>%   sapply(., function(x) x[1])%>% gsub(',', '', .) %>% as.numeric()
+  if (length(num_review)!= length(name)){
+    num_review = rep(-1, length(name))
+  }
+  temp_df = data.frame(name=name, href=href,num_review=num_review, stringsAsFactors = F )
+  temp_df = na.omit(temp_df)
+  pattern = capture(one_or_more(DGT) %R%optional(DOT)%R% optional(DGT)) %R% ' of 5 bubbles'
+  rating= str_match_all( html_page, pattern = pattern)[[1]][,2]
+  temp_df$rating = rating[1:nrow(temp_df)]
+  
+  url_df = rbind(url_df, temp_df)
+  
+  remDr$findElement(value='//*[@id="taplc_airlines_lander_main_0"]/div/div[13]/div/div/span[2]')$clickElement()
+  Sys.sleep(3)
+}
+
+```
+
+
+#fill the empties
+```{r}
+
+for(i in 565: nrow(url_df) ){
+  if (url_df$num_review[i]==-1 | url_df$num_review[i]==-2 )
+  {
+    print(i)
+    url = paste('https://www.tripadvisor.com.au', url_df$href[i], sep ='')
+    # download.file(url, destfile = "scrapedpage.html", quiet=TRUE)
+    
+    target = read_html(url)
+    Sys.sleep(2)
+    
+    a= target %>% html_nodes(".numRatings") %>% html_attr("content")
+    if(length(a)>0)
+      url_df$num_review[i]= as.numeric(a)
+  }
+  else{
+    url_df$num_review[i]=-2
+  }
+}
+
+save(url_df, file = 'url_df.RData')
+
+
+```
+
+
+#select some airlines to extract reviews from
+```{r}
+months_pattern = or('January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December')
+year_pattern = one_or_more(DGT)
+rating_pattern = "ui_bubble_rating bubble_" %R% capture(one_or_more(DGT))
+
+review_data = data.frame(id='', name='', text_review ='', rating = '', date_of_travel_year ='',date_of_travel_month ='', category_labels='', quotes ='', stringsAsFactors = F)
+selected_airlines = url_df[url_df$num_review>1000,]
+
+selected_airlines = selected_airlines %>% arrange(desc(num_review))
+# save(file = 'reviee', review_data)
+```
+
+
+#extract reviews from selected airlines
+```{r}
+closeAllConnections()
+start_i = 141
+end_i= 141
+start_page = 1
+for (i in start_i: end_i){
+  max_review = selected_airlines$num_review[i]
+  print("i= ")
+  print(i)
+  url = paste('https://www.tripadvisor.com', selected_airlines$href[i], sep ='')
+  tmp_con = url(url, 'rb')
+  print('hello')
+  html_page= read_html(tmp_con)
+  max_page= html_page %>% html_nodes('a.pageNum.taLnk') %>% as.character() %>% str_replace(., '"','') %>%.[[length(.)]] %>%  str_match_all(., pattern= START %R% '<a data-page-number=' %R% capture(one_or_more(DGT))  ) %>% .[[1]] %>% .[,2] %>% as.numeric()
+close.connection(tmp_con)
+        # j=start_j
+  for (page_num in start_page: max_page ){
+    if (page_num==1){
+      sub_con = url(url, 'rb')
+
+      html_page= read_html(sub_con)
+    }
+    else{
+      splitted_url = strsplit(url, 'Reviews')[[1]]
+      suburl = paste(splitted_url[1], 'Reviews-or',  (page_num-1)*10 , splitted_url[2], sep = '' )
+      sub_con = url(suburl, 'rb')
+      html_page = read_html(sub_con)
+    }
+
+      bubbles = html_page %>% html_nodes('.innerBubble')
+      quotes = bubbles %>% html_node('.noQuotes') %>% html_text()
+      #more?
+      text_review = bubbles %>% html_node('.partial_entry')  %>% html_text()
+      months = bubbles %>% html_nodes(".basicTravelDate") %>% as.character() %>% str_match_all(., pattern=months_pattern) %>% unlist()
+      years = bubbles %>% html_nodes(".basicTravelDate") %>% as.character() %>% str_match_all(., pattern=year_pattern) %>% unlist()
+      category_labels = lapply(bubbles, function(bub)  bub %>% html_nodes(".allLabels") %>% html_nodes('.categoryLabel') %>% html_text %>% paste(., collapse='| ') ) %>% unlist()
+      rating = bubbles %>% as.character() %>% str_match_all(., rating_pattern) %>% sapply(., function(x) x[1,2])
+      
+      
+      if(length(years)!= length(bubbles)){
+        years = rep('NA', length(bubbles))
+      }
+      
+       if(length(months)!= length(bubbles)){
+        months = rep('NA', length(bubbles))
+      }
+      tmp_data = data.frame(id =rep(i, length(bubbles)) , name=rep(selected_airlines$name[i], length(bubbles)) , text_review =text_review, rating = rating, date_of_travel_year =years,date_of_travel_month =months, category_labels=category_labels, quotes =quotes, stringsAsFactors = F)
+
+      # j=j+length(bubbles)
+      review_data = rbind(review_data, tmp_data)
+      print("nrow= ")
+      print(nrow(review_data))
+      print('page_num')
+      print(page_num)
+      close.connection(sub_con)
+      
+  }
+start_page = 1
+}
+
+
+```
+
+
+#Preprocess
+```{r}
+
+review_data_all %>% distinct(text_review, id, .keep_all = T) %>% .[-1,]-> review_data_preprocess
+review_data_preprocess$id = as.numeric(review_data_preprocess$id)
+review_data_preprocess$continent= str_split(review_data_preprocess$category_labels,fixed("| "), n=3)%>% sapply(., function(x) x[1])
+
+
+splitted_category_label = str_split(review_data_preprocess$category_labels,fixed("| "), n=3)
+
+
+
+
+review_data_preprocess$type= splitted_category_label%>% sapply(., function(x) x[2])
+
+review_data_preprocess$from= splitted_category_label%>% sapply(., function(x) x[3]) %>% str_split(., " - ", n=2) %>% sapply(., function(x) x[1])
+
+review_data_preprocess$to= splitted_category_label%>% sapply(., function(x) x[3]) %>% str_split(., " - ", n=2) %>% sapply(., function(x) x[2])
+
+
+review_data_preprocess %>% filter(str_detect(type, '-')) %>% .$type %>% str_split(.,fixed(" - "), n=2) %>% sapply(., function(x) x[1]) -> from
+
+review_data_preprocess %>% filter(str_detect(type, '-')) %>% .$type %>% str_split(.,fixed(" - "), n=2) %>% sapply(., function(x) x[2]) -> to
+
+review_data_preprocess[str_detect(review_data_preprocess$type, '-') & ! is.na(review_data_preprocess$type), ]$from = from
+
+review_data_preprocess[str_detect(review_data_preprocess$type, '-') & ! is.na(review_data_preprocess$type), ]$to = to
+
+review_data_preprocess[str_detect(review_data_preprocess$type, '-') & ! is.na(review_data_preprocess$type), ]$type = NA
+
+
+
+```
+
+#Merge url_df with review_data
+```{r}
+review_data_preprocess_merged= merge(review_data_preprocess, url_df, by ='name')
+review_data_preprocess_merged$review_rating = review_data_preprocess_merged$rating.x
+review_data_preprocess_merged$rating.x = NULL
+review_data_preprocess_merged$airline_rating = review_data_preprocess_merged$rating.y
+review_data_preprocess_merged$rating.y = NULL
+```
+
+
+#Some Data Analysis
+##How many reviews we have for each airline rate
+```{r}
+knitr::kable(table(review_data_preprocess_merged$airline_rating))
+
+
+```
+
+##How many reviews we have for each review rate
+```{r}
+knitr::kable(table(review_data_preprocess_merged$review_rating))
+```
+
+```{r}
+library(tm)
+library(wordcloud)
+```
+
+
+#Make wordcloud(text_review)
+
+##Corpus
+```{r}
+review_source <- VectorSource(review_data_preprocess_merged$text_review)
+review_corpus <- Corpus(review_source)
+
+```
+
+
+##Clean corpus
+```{r}
+# Alter the customized function code to match the instructions
+clean_corpus <- function(corpus){
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, 
+                   content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords,
+                   c(stopwords("en")))
+  return(corpus)
+}
+
+clean_corp <- clean_corpus(review_corpus)
+
+```
+
+
+##WordCloud
+```{r}
+wordcloud(clean_corp,min.freq = 2, scale=c(7,0.5),colors=brewer.pal(8, "Dark2"),  random.color= TRUE, random.order = FALSE, max.words = 500)
+
+```
+
+
+
+##Clean corpus( remove obvious words)
+```{r}
+# Alter the customized function code to match the instructions
+clean_corpus <- function(corpus){
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, 
+                   content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords,
+                   c(stopwords("en"), 'flight', 'flights', 'airline', 'airlines', 'plane'))
+  return(corpus)
+}
+
+clean_corp_without_obvious <- clean_corpus(review_corpus)
+
+
+```
+
+##WordCloud without obvious words
+```{r}
+wordcloud(clean_corp_without_obvious,min.freq = 2, scale=c(7,0.5),colors=brewer.pal(8, "Dark2"),  random.color= TRUE, random.order = FALSE, max.words = 500)
+
+```
+
+
+
+#Make wordcloud(topic)
+
+##Corpus
+```{r}
+review_source_quotes <- VectorSource(review_data_preprocess_merged$quotes)
+review_corpus_quotes <- Corpus(review_source_quotes)
+
+```
+
+
+#Clean corpus
+```{r}
+# Alter the customized function code to match the instructions
+clean_corpus <- function(corpus){
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, 
+                   content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords,
+                   c(stopwords("en")))
+  return(corpus)
+}
+
+clean_corp_quotes <- clean_corpus(review_corpus_quotes)
+
+```
+
+
+#WordCloud
+```{r}
+wordcloud(clean_corp_quotes,min.freq = 2, scale=c(7,0.5),colors=brewer.pal(8, "Dark2"),  random.color= TRUE, random.order = FALSE, max.words = 500)
+
+```
+
+
+
+```{r}
+save(review_data_preprocess_merged, file = 'review_data_merged.RData')
+write.csv(file = 'review_data_merged.csv', review_data_preprocess_merged)
+write.csv(file = 'review_data_preprocess.csv', review_data_preprocess)
+write.csv(file = "url_df.csv", url_df)
+```
+
